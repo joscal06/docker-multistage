@@ -1,0 +1,14 @@
+# ANTES · Dockerfile "básico" del frontend, como lo tenía el equipo.
+# Se conserva solo para comparar tamaño y tiempos contra frontend/Dockerfile:
+#   docker build -f comparacion/Dockerfile.frontend -t voltio/frontend:basico frontend
+#
+# Problemas: imagen base completa (Debian + toolchain), una sola etapa con
+# devDependencies y código fuente en producción, `COPY . .` antes de instalar
+# (cualquier cambio de código invalida la caché de `npm install`), corre como root.
+FROM node:20
+WORKDIR /app
+COPY . .
+RUN npm install
+RUN npm run build
+EXPOSE 3000
+CMD ["npm", "start"]

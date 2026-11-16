@@ -1,0 +1,10 @@
+# Variables reales del ecosistema (usar .env.example como plantilla)
+.env
+
+# Dependencias y compilaciones locales
+node_modules/
+.next/
+vendor/
+
+.DS_Store
+Thumbs.db

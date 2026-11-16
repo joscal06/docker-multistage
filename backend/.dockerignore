@@ -1,0 +1,47 @@
+# Dependencias: vendor/ se genera en la etapa "vendor" del Dockerfile
+vendor
+node_modules
+public/build
+public/hot
+public/storage
+
+# Variables de entorno y secretos (se pasan en runtime, nunca en la imagen)
+.env
+.env.*
+auth.json
+
+# Archivos generados en tiempo de ejecución
+bootstrap/cache/*.php
+storage/logs/*
+!storage/logs/.gitignore
+storage/framework/cache/data/*
+!storage/framework/cache/data/.gitignore
+storage/framework/sessions/*
+!storage/framework/sessions/.gitignore
+storage/framework/views/*
+!storage/framework/views/.gitignore
+storage/*.key
+
+# Solo se usan en desarrollo
+tests
+phpunit.xml
+.phpunit.cache
+.phpunit.result.cache
+package.json
+vite.config.js
+.editorconfig
+
+# Docker, Git y documentación
+Dockerfile*
+.dockerignore
+.git
+.gitattributes
+.gitignore
+*.md
+
+# Editores y basura del sistema
+.idea
+.vscode
+*.log
+.DS_Store
+Thumbs.db

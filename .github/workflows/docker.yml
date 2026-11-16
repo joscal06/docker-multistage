@@ -1,0 +1,222 @@
+name: Ecosistema Docker
+
+# Construye las imágenes, levanta el ecosistema con `docker compose up` y
+# prueba los tres servicios. Los resultados se publican como anotaciones
+# (::notice), que se ven en la página pública del workflow sin iniciar sesión.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ecosistema:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Versiones de Docker
+        run: |
+          docker version --format 'Docker Engine {{.Server.Version}}'
+          docker compose version
+
+      - name: Generar .env (claves aleatorias) y validar docker-compose.yml
+        run: |
+          ./scripts/generar-env.sh
+          docker compose config --quiet
+          echo "docker-compose.yml válido"
+
+      # ---------------------------------------------------------------------
+      # ANTES: Dockerfiles básicos (una etapa), solo para comparar
+      # ---------------------------------------------------------------------
+      - name: "ANTES · build de los Dockerfiles básicos"
+        run: |
+          t0=$(date +%s)
+          docker build -q -f comparacion/Dockerfile.frontend -t voltio/frontend:basico frontend
+          t1=$(date +%s)
+          docker build -q -f comparacion/Dockerfile.backend -t voltio/api:basico backend
+          t2=$(date +%s)
+          echo "T_BASICO_FE=$((t1 - t0))" >> "$GITHUB_ENV"
+          echo "T_BASICO_BE=$((t2 - t1))" >> "$GITHUB_ENV"
+
+      # ---------------------------------------------------------------------
+      # DESPUÉS: Dockerfiles multi-stage, construidos por docker compose
+      # ---------------------------------------------------------------------
+      - name: "DESPUÉS · docker compose build (multi-stage)"
+        run: |
+          t0=$(date +%s)
+          docker compose --progress=plain build frontend 2>&1 | tail -n 25
+          t1=$(date +%s)
+          docker compose --progress=plain build api nginx 2>&1 | tail -n 25
+          t2=$(date +%s)
+          echo "T_MULTI_FE=$((t1 - t0))" >> "$GITHUB_ENV"
+          echo "T_MULTI_BE=$((t2 - t1))" >> "$GITHUB_ENV"
+
+      - name: docker compose up
+        run: |
+          docker compose up -d --wait --wait-timeout 300 || {
+            docker compose ps -a
+            docker compose logs --no-color
+            exit 1
+          }
+          docker compose ps
+
+      # ---------------------------------------------------------------------
+      # Pruebas de funcionamiento
+      # ---------------------------------------------------------------------
+      - name: Probar API (Nginx → PHP-FPM → MySQL)
+        run: |
+          curl -fsS http://localhost:8000/up -o /dev/null
+          curl -fsS 'http://localhost:8000/api/products?per_page=100' > productos.json
+          jq -r '"Productos en la API: \(.meta.total)"' productos.json
+          jq -r '.data[:3][] | "  - \(.sku) \(.name)"' productos.json
+          TOKEN=$(curl -fsS -X POST http://localhost:8000/api/auth/login \
+            -H 'Accept: application/json' -H 'Content-Type: application/json' \
+            -d '{"email":"cliente@demo.test","password":"password"}' | jq -r '.data.token')
+          test -n "$TOKEN" && test "$TOKEN" != "null"
+          curl -fsS http://localhost:8000/api/auth/me -H "Authorization: Bearer $TOKEN" -H 'Accept: application/json' | jq -c '.data | {name, email}'
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8000/api/documentation)" = "200"
+          echo "API OK"
+
+      - name: Probar frontend (Next.js → API por la red interna)
+        run: |
+          curl -fsS http://localhost:3000/api/health | jq -c .
+          curl -fsS http://localhost:3000/ > inicio.html
+          # Nombres de la API (hasta la primera comilla, porque React escapa ")
+          jq -r '.data[].name | split("\"")[0]' productos.json > nombres.txt
+          grep -oFf nombres.txt inicio.html | sort -u > en_portada.txt
+          echo "Productos de la API visibles en la portada: $(wc -l < en_portada.txt)"
+          test -s en_portada.txt
+          NOMBRE=$(curl -fsS http://localhost:8000/api/products/1 | jq -r '.data.name | split("\"")[0]')
+          curl -fsS http://localhost:3000/productos/1 | grep -qF "$NOMBRE"
+          echo "NOMBRE_DETALLE=$NOMBRE" >> "$GITHUB_ENV"
+          echo "El catálogo del frontend muestra productos leídos de MySQL a través de la API"
+
+      - name: Probar persistencia del volumen de MySQL (down + up)
+        run: |
+          CLAVE="persistencia-$(openssl rand -hex 6)"
+          curl -fsS -X POST http://localhost:8000/api/auth/register \
+            -H 'Accept: application/json' -H 'Content-Type: application/json' \
+            -d "{\"name\":\"Prueba Volumen\",\"email\":\"volumen@demo.test\",\"password\":\"$CLAVE\",\"password_confirmation\":\"$CLAVE\"}" -o /dev/null
+          docker compose down
+          docker compose up -d --wait --wait-timeout 300
+          curl -fsS -X POST http://localhost:8000/api/auth/login \
+            -H 'Accept: application/json' -H 'Content-Type: application/json' \
+            -d "{\"email\":\"volumen@demo.test\",\"password\":\"$CLAVE\"}" | jq -e '.data.token' > /dev/null
+          echo "El usuario creado antes de 'docker compose down' sigue existiendo"
+
+      # ---------------------------------------------------------------------
+      # Evidencias (anotaciones públicas + resumen del job)
+      # ---------------------------------------------------------------------
+      - name: "Evidencia 1 · tamaño de las imágenes"
+        run: |
+          mb() { docker image inspect -f '{{.Size}}' "$1" | awk '{printf "%.0f", $1/1000000}'; }
+          FE_B=$(mb voltio/frontend:basico); FE=$(mb voltio/frontend:1.0)
+          BE_B=$(mb voltio/api:basico);      BE=$(mb voltio/api:1.0); NG=$(mb voltio/nginx:1.0)
+          DB=$(mb mysql:8.0)
+          pct() { awk -v a="$1" -v b="$2" 'BEGIN{printf "%.0f", (1-b/a)*100}'; }
+          echo "::notice title=1. Frontend Next.js::Imagen básica (node:20, 1 etapa) ${FE_B} MB → multi-stage (node:22-alpine) ${FE} MB: $(pct $FE_B $FE)% menos"
+          echo "::notice title=2. API Laravel::Imagen básica (php:8.2-fpm, 1 etapa) ${BE_B} MB → multi-stage (php:8.2-fpm-alpine) ${BE} MB: $(pct $BE_B $BE)% menos. Nginx (proxy inverso): ${NG} MB"
+          echo "::notice title=3. Base de datos::Imagen oficial mysql:8.0 (${DB} MB), sin construir"
+          {
+            echo "## Tamaño de las imágenes"
+            echo "| Servicio | Básica (antes) | Multi-stage (después) | Reducción |"
+            echo "| --- | --- | --- | --- |"
+            echo "| Frontend | ${FE_B} MB | ${FE} MB | $(pct $FE_B $FE)% |"
+            echo "| API (PHP-FPM) | ${BE_B} MB | ${BE} MB | $(pct $BE_B $BE)% |"
+            echo "| Nginx | — | ${NG} MB | — |"
+            echo "| MySQL | — | ${DB} MB (oficial) | — |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          docker images --format 'table {{.Repository}}:{{.Tag}}\t{{.Size}}' | grep -E 'voltio|mysql'
+
+      - name: "Evidencia 2 · contenido y seguridad de los contenedores"
+        run: |
+          EXT=$(docker compose exec -T api php -m | grep -ixE 'pdo_mysql|mbstring|openssl|tokenizer|xml|ctype|json|Zend OPcache' | sort -f | paste -sd ' ')
+          PHPV=$(docker compose exec -T api php -r 'echo PHP_VERSION;')
+          U_FE=$(docker compose exec -T frontend whoami); U_API=$(docker compose exec -T api whoami)
+          NODEV=$(docker compose exec -T frontend node -p process.version)
+          ARCH_FE=$(docker compose exec -T frontend ls -A /app | paste -sd ' ')
+          COMPOSER=$(docker compose exec -T api sh -c 'command -v composer >/dev/null && echo "sí" || echo "no"')
+          TESTS=$(docker compose exec -T api sh -c '[ -d tests ] && echo "sí" || echo "no"')
+          SERVER=$(curl -sI http://localhost:8000/api/products | grep -i '^server:' | tr -d '\r' | cut -d' ' -f2-)
+          POWERED=$(curl -sI http://localhost:8000/api/products | grep -ci '^x-powered-by' || true)
+          echo "::notice title=4. Extensiones PHP ${PHPV}::${EXT}"
+          echo "::notice title=5. Usuarios sin privilegios::frontend corre como '${U_FE}' (Node.js ${NODEV}); api (PHP-FPM) corre como '${U_API}'"
+          echo "::notice title=6. Imagen final del frontend::/app solo contiene: ${ARCH_FE}"
+          echo "::notice title=7. Imagen final de la API::Composer instalado: ${COMPOSER}; carpeta tests: ${TESTS}; vendor/ copiado desde la etapa de build. Cabecera Server: ${SERVER}; cabeceras X-Powered-By: ${POWERED}"
+
+      - name: "Evidencia 3 · MySQL, red y funcionamiento"
+        run: |
+          set -a; source .env; set +a
+          q() { docker compose exec -T db mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE" -N -B -e "$1" 2>/dev/null; }
+          INIT=$(q "SELECT valor FROM ecosistema_info WHERE clave='inicializado_por'")
+          MYV=$(q "SELECT VERSION()")
+          PROD=$(q "SELECT COUNT(*) FROM products")
+          USERS=$(q "SELECT COUNT(*) FROM users")
+          if (exec 3<>/dev/tcp/127.0.0.1/3306) 2>/dev/null; then P3306="ABIERTO"; else P3306="cerrado (no expuesto)"; fi
+          publicados() { docker compose ps --format json "$1" | jq -r '[.Publishers[]? | select(.PublishedPort > 0) | "\(.PublishedPort)->\(.TargetPort)"] | unique | join(",") | if . == "" then "ninguno" else . end'; }
+          PUERTOS="frontend $(publicados frontend); nginx $(publicados nginx); api $(publicados api); db $(publicados db)"
+          ESTADOS=$(docker compose ps --format '{{.Service}} {{.Health}}' | paste -sd ',' | sed 's/,/, /g')
+          EN_PORTADA=$(wc -l < en_portada.txt)
+          echo "::notice title=8. MySQL ${MYV}::Script de /docker-entrypoint-initdb.d ejecutado (${INIT}); ${PROD} productos y ${USERS} usuarios persistidos en el volumen db_data"
+          echo "::notice title=9. Red y puertos::Puertos publicados: ${PUERTOS}. Puerto 3306 en el host: ${P3306}"
+          echo "::notice title=10. Ecosistema saludable::${ESTADOS}. Portada del frontend con ${EN_PORTADA} productos y detalle /productos/1 '${NOMBRE_DETALLE}', leídos de MySQL vía Nginx → PHP-FPM"
+          {
+            echo "## Estado del ecosistema"
+            echo '```'
+            docker compose ps
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # ---------------------------------------------------------------------
+      # Caché de capas: se cambia UNA línea de código y se reconstruye
+      # ---------------------------------------------------------------------
+      - name: "Evidencia 4 · caché de capas al cambiar el código"
+        run: |
+          echo "// cambio de prueba para medir la caché de capas" >> frontend/src/lib/format.ts
+          echo "// cambio de prueba para medir la caché de capas" >> backend/routes/console.php
+
+          t0=$(date +%s)
+          docker compose --progress=plain build frontend api nginx > rebuild.log 2>&1
+          t1=$(date +%s)
+          docker build -q -f comparacion/Dockerfile.frontend -t voltio/frontend:basico frontend
+          docker build -q -f comparacion/Dockerfile.backend -t voltio/api:basico backend
+          t2=$(date +%s)
+
+          cacheado() {
+            for id in $(grep -E "$1" rebuild.log | grep -oE '^#[0-9]+' | sort -u); do
+              grep -q "^$id CACHED$" rebuild.log && { echo "CACHED"; return; }
+            done
+            echo "se ejecutó"
+          }
+          NPM=$(cacheado 'RUN .*npm ci --no-audit --no-fund$')
+          CMP=$(cacheado 'RUN .*composer install')
+          EXTS=$(cacheado 'RUN apk add --no-cache --virtual .build-deps')
+          N_CACHED=$(grep -c ' CACHED$' rebuild.log || true)
+
+          echo "::notice title=11. Build inicial (sin caché)::Básico: frontend ${T_BASICO_FE}s + API ${T_BASICO_BE}s. Multi-stage: frontend ${T_MULTI_FE}s + API/Nginx ${T_MULTI_BE}s"
+          echo "::notice title=12. Rebuild tras cambiar 1 archivo de código::Multi-stage $((t1 - t0))s (npm ci: ${NPM}; composer install: ${CMP}; extensiones PHP: ${EXTS}; ${N_CACHED} pasos desde caché) vs básico $((t2 - t1))s (reinstala todas las dependencias)"
+          {
+            echo "## Caché de capas"
+            echo "| Build | Básico | Multi-stage |"
+            echo "| --- | --- | --- |"
+            echo "| Inicial (frontend + API) | $((T_BASICO_FE + T_BASICO_BE)) s | $((T_MULTI_FE + T_MULTI_BE)) s |"
+            echo "| Tras cambiar 1 archivo | $((t2 - t1)) s | $((t1 - t0)) s |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          grep -B1 ' CACHED$' rebuild.log | grep -E '^#[0-9]+ \[' | head -n 30
+
+      - name: Logs de los contenedores
+        if: always()
+        run: docker compose logs --no-color --tail=40
+
+      - name: Apagar el ecosistema
+        if: always()
+        run: docker compose down -v

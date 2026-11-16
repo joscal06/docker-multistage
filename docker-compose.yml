@@ -1,0 +1,119 @@
+# Ecosistema Voltio: frontend Next.js + API Laravel (Nginx + PHP-FPM) + MySQL
+# Levantar todo:  docker compose up -d --build
+name: voltio
+
+services:
+  # ---------------------------------------------------------------------------
+  # Base de datos MySQL 8.0 (imagen oficial). Sin "ports": el 3306 solo existe
+  # dentro de la red interna "data", no se publica en el host.
+  # ---------------------------------------------------------------------------
+  db:
+    image: mysql:8.0
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Define MYSQL_ROOT_PASSWORD en .env}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-ecommerce_api}
+      MYSQL_USER: ${MYSQL_USER:-voltio}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?Define MYSQL_PASSWORD en .env}
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - db_data:/var/lib/mysql
+      - ./database/init:/docker-entrypoint-initdb.d:ro
+    networks: [data]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u\"$$MYSQL_USER\" -p\"$$MYSQL_PASSWORD\" --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+
+  # ---------------------------------------------------------------------------
+  # API Laravel en PHP-FPM (backend/Dockerfile, target "api")
+  # ---------------------------------------------------------------------------
+  api:
+    build:
+      context: ./backend
+      target: api
+    image: voltio/api:1.0
+    restart: unless-stopped
+    environment:
+      APP_NAME: Voltio API
+      APP_ENV: production
+      APP_DEBUG: "false"
+      APP_KEY: ${APP_KEY:?Define APP_KEY en .env}
+      APP_URL: ${API_PUBLIC_URL:-http://localhost:8000}
+      LOG_CHANNEL: stderr
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      DB_CONNECTION: mysql
+      DB_HOST: db
+      DB_PORT: 3306
+      DB_DATABASE: ${MYSQL_DATABASE:-ecommerce_api}
+      DB_USERNAME: ${MYSQL_USER:-voltio}
+      DB_PASSWORD: ${MYSQL_PASSWORD}
+      JWT_SECRET: ${JWT_SECRET:?Define JWT_SECRET en .env}
+      JWT_TTL: ${JWT_TTL:-60}
+      STRIPE_KEY: ${STRIPE_KEY:-}
+      STRIPE_SECRET: ${STRIPE_SECRET:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      STRIPE_CURRENCY: ${STRIPE_CURRENCY:-usd}
+      RUN_MIGRATIONS: "true"
+      SEED_DATABASE: ${SEED_DATABASE:-true}
+    depends_on:
+      db:
+        condition: service_healthy
+    # "app" para hablar con Nginx (y salir a Stripe); "data" para llegar a MySQL
+    networks: [app, data]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+
+  # ---------------------------------------------------------------------------
+  # Nginx: proxy inverso de la API (backend/Dockerfile, target "web")
+  # ---------------------------------------------------------------------------
+  nginx:
+    build:
+      context: ./backend
+      target: web
+    image: voltio/nginx:1.0
+    restart: unless-stopped
+    ports:
+      - "${API_PORT:-8000}:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    networks: [edge, app]
+    security_opt: [no-new-privileges:true]
+
+  # ---------------------------------------------------------------------------
+  # Frontend Next.js (frontend/Dockerfile). Llama a la API desde el servidor
+  # por la red interna (http://nginx/api); el navegador nunca habla con la API.
+  # ---------------------------------------------------------------------------
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY: ${NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY:-}
+    image: voltio/frontend:1.0
+    restart: unless-stopped
+    environment:
+      API_BASE_URL: http://nginx/api
+      SITE_URL: ${SITE_URL:-http://localhost:3000}
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    depends_on:
+      nginx:
+        condition: service_healthy
+    networks: [edge]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+
+networks:
+  edge: {}            # frontend ↔ nginx
+  app: {}             # nginx ↔ api
+  data:
+    internal: true    # api ↔ db, sin salida a Internet ni acceso desde el host
+
+volumes:
+  db_data: {}         # datos persistentes de MySQL (/var/lib/mysql)

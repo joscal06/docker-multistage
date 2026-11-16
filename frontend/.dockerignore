@@ -1,0 +1,27 @@
+# Dependencias y compilaciones: se generan dentro de la imagen
+node_modules
+.next
+out
+build
+coverage
+*.tsbuildinfo
+next-env.d.ts
+
+# Variables de entorno y secretos (se pasan en runtime, nunca en la imagen)
+.env
+.env.*
+!.env.example
+*.local.json
+
+# Docker y documentación
+Dockerfile*
+.dockerignore
+*.md
+
+# Editores, logs y basura del sistema
+.git
+.vscode
+.idea
+*.log
+.DS_Store
+Thumbs.db

@@ -1,0 +1,17 @@
+# ANTES · Dockerfile "básico" de la API, como lo tenía el equipo.
+# Se conserva solo para comparar tamaño y tiempos contra backend/Dockerfile:
+#   docker build -f comparacion/Dockerfile.backend -t voltio/api:basico backend
+#
+# Problemas: imagen base Debian, herramientas de compilación, git y Composer
+# quedan en la imagen final, se instalan las dependencias de desarrollo,
+# `COPY . .` antes de `composer install` (cualquier cambio invalida la caché)
+# y corre como root.
+FROM php:8.2-fpm
+RUN apt-get update && apt-get install -y git unzip libzip-dev
+RUN docker-php-ext-install pdo_mysql zip pcntl
+COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
+WORKDIR /var/www/html
+COPY . .
+RUN composer install
+EXPOSE 9000
+CMD ["php-fpm"]
