@@ -118,24 +118,17 @@ jobs:
       # ---------------------------------------------------------------------
       - name: "Evidencia 1 · tamaño de las imágenes"
         run: |
-          # Tamaño en disco (sin comprimir): du del sistema de archivos de la imagen
-          disco() { docker run --rm --user 0 --entrypoint sh "$1" -c 'du -skx / 2>/dev/null | cut -f1' | awk '{printf "%.0f", $1/1024}'; }
-          # Tamaño que reporta Docker (con el almacén containerd es el tamaño comprimido de descarga)
-          comp() { docker image inspect -f '{{.Size}}' "$1" | awk '{printf "%.0f", $1/1048576}'; }
+          # Mismo valor que la columna SIZE de `docker images` (MB = 1 000 000 bytes)
+          mb() { docker image inspect -f '{{.Size}}' "$1" | awk '{printf "%.0f", $1/1000000}'; }
           pct() { awk -v a="$1" -v b="$2" 'BEGIN{printf "%.0f", (1-b/a)*100}'; }
-          DRIVER=$(docker info -f '{{.Driver}}')
-          for img in voltio/frontend:basico voltio/frontend:1.0 voltio/api:basico voltio/api:1.0 voltio/nginx:1.0 mysql:8.0; do
-            k=$(printf '%s' "$img" | tr -c 'a-zA-Z0-9' '_')
-            eval "D_$k=$(disco $img); C_$k=$(comp $img)"
-          done
-          FE_B=$D_voltio_frontend_basico; FE=$D_voltio_frontend_1_0; BE_B=$D_voltio_api_basico; BE=$D_voltio_api_1_0
-          FE_BC=$C_voltio_frontend_basico; FEC=$C_voltio_frontend_1_0; BE_BC=$C_voltio_api_basico; BEC=$C_voltio_api_1_0
-          NG=$D_voltio_nginx_1_0; NGC=$C_voltio_nginx_1_0; DB=$D_mysql_8_0; DBC=$C_mysql_8_0
-          echo "::notice title=1. Frontend Next.js::Imagen básica (node:20, 1 etapa) ${FE_B} MB en disco → multi-stage (node:22-alpine) ${FE} MB: $(pct $FE_B $FE)% menos. Comprimida: ${FE_BC} MB → ${FEC} MB"
-          echo "::notice title=2. API Laravel::Imagen básica (php:8.2-fpm, 1 etapa) ${BE_B} MB en disco → multi-stage (php:8.2-fpm-alpine) ${BE} MB: $(pct $BE_B $BE)% menos. Comprimida: ${BE_BC} MB → ${BEC} MB. Nginx (proxy inverso): ${NG} MB en disco, ${NGC} MB comprimida"
-          echo "::notice title=3. Base de datos::Imagen oficial mysql:8.0, sin construir: ${DB} MB en disco, ${DBC} MB comprimida (almacén de imágenes: ${DRIVER})"
+          FE_B=$(mb voltio/frontend:basico); FE=$(mb voltio/frontend:1.0)
+          BE_B=$(mb voltio/api:basico);      BE=$(mb voltio/api:1.0)
+          NG=$(mb voltio/nginx:1.0);         DB=$(mb mysql:8.0)
+          echo "::notice title=1. Frontend Next.js::Imagen básica (node:20, 1 etapa) ${FE_B} MB → multi-stage (node:22-alpine) ${FE} MB: $(pct $FE_B $FE)% menos"
+          echo "::notice title=2. API Laravel::Imagen básica (php:8.2-fpm, 1 etapa) ${BE_B} MB → multi-stage (php:8.2-fpm-alpine) ${BE} MB: $(pct $BE_B $BE)% menos. Nginx (proxy inverso, nginx:1.28-alpine): ${NG} MB"
+          echo "::notice title=3. Base de datos::Imagen oficial mysql:8.0 (${DB} MB), se usa sin construir"
           {
-            echo "## Tamaño de las imágenes (en disco)"
+            echo "## Tamaño de las imágenes (docker images)"
             echo "| Servicio | Básica (antes) | Multi-stage (después) | Reducción |"
             echo "| --- | --- | --- | --- |"
             echo "| Frontend | ${FE_B} MB | ${FE} MB | $(pct $FE_B $FE)% |"
