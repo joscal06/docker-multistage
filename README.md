@@ -175,6 +175,22 @@ Un mismo Dockerfile produce **dos imágenes** (`target: api` y `target: web`) qu
 
 En [`comparacion/`](comparacion) están los Dockerfiles "básicos" con los que trabajaba el equipo: una sola etapa, imagen base completa, `COPY . .` antes de instalar dependencias, devDependencies y herramientas en producción, y ejecución como root. El workflow de GitHub Actions construye las dos versiones y publica la comparación de tamaño y de tiempos de build.
 
+### Resultados medidos
+
+Datos de la ejecución [#3 del workflow](https://github.com/joscal06/docker-multistage/actions/runs/44178016611) (runner `ubuntu-24.04`; tamaños como los reporta `docker images`):
+
+| Imagen | Básica (antes) | Multi-stage (después) | Reducción |
+| --- | --- | --- | --- |
+| Frontend Next.js | 1961 MB (`node:20`) | **511 MB** (`node:22-alpine`) | 74 % |
+| API Laravel (PHP-FPM) | 681 MB (`php:8.2-fpm`) | **124 MB** (`php:8.2-fpm-alpine`) | 82 % |
+| Nginx (proxy inverso) | — | 62 MB (`nginx:1.28-alpine`) | — |
+| MySQL | — | 799 MB (`mysql:8.0` oficial, sin construir) | — |
+
+| Tiempo de build | Básico | Multi-stage |
+| --- | --- | --- |
+| Inicial, sin caché (frontend + API) | 96 s | 74 s |
+| Tras cambiar una línea de código | 58 s | **12 s** (`npm ci`, `composer install` y la compilación de extensiones salen de la caché: 19 pasos reutilizados) |
+
 ## Verificación automática (GitHub Actions)
 
 [`.github/workflows/docker.yml`](.github/workflows/docker.yml) se ejecuta en cada push y:
